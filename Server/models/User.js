@@ -2,6 +2,11 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+  },
   username: {
     type: String,
     required: true,
@@ -15,53 +20,78 @@ const userSchema = new mongoose.Schema({
     unique: true,
     lowercase: true,
   },
+
+  // 🆕 Password is now optional (for Google users)
   password: {
     type: String,
-    required: true,
+    required: function () {
+      return this.authProvider === 'local';
+    },
   },
-  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // Users following this user
-  following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // Users that this user follows
+
+  // 🆕 Add authProvider field: 'local' for email/password, 'google' for Google auth
+  authProvider: {
+    type: String,
+    enum: ['local', 'google'],
+    default: 'local',
+  },
+
+  // Social
+  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
+  // Forgot/reset password support
+  resetPasswordToken: {
+    type: String,
+    default: null,
+  },
+  resetPasswordExpires: {
+    type: Date,
+    default: null,
+  },
 }, { timestamps: true });
+
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+  if (this.authProvider !== 'local' || !this.isModified('password')) return next();
+
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
   next();
 });
 
+
 // Password match method
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (this.authProvider !== 'local') {
+    throw new Error('Password authentication not allowed for this account');
+  }
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-// Follow method
+
+// Follow / Unfollow methods
 userSchema.methods.follow = async function (userToFollowId) {
   if (this.following.includes(userToFollowId)) {
     throw new Error('Already following this user');
   }
-
   this.following.push(userToFollowId);
   await this.save();
 };
 
-// Unfollow method
 userSchema.methods.unfollow = async function (userToUnfollowId) {
   if (!this.following.includes(userToUnfollowId)) {
     throw new Error('Not following this user');
   }
-
   this.following.pull(userToUnfollowId);
   await this.save();
 };
 
-// Method to get a user’s followers
 userSchema.methods.getFollowers = function () {
   return this.followers;
 };
 
-// Method to get a user’s following
 userSchema.methods.getFollowing = function () {
   return this.following;
 };

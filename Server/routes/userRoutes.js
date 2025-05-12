@@ -1,20 +1,15 @@
 const express = require('express');
 const { protect } = require('../middlewares/authMiddleware');
+const { getProfile } = require('../controllers/userController');
+const { followUser, unfollowUser } = require('../controllers/followController');
 const User = require('../models/User');
+
 
 const router = express.Router();
 
-// Protected route - get logged-in user's profile
-router.get('/profile', protect, async (req, res) => {
-  try {
-    const user = await User.findById(req.user).select('-password');
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    res.json(user);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
+router.post('/follow', protect, followUser); // Follow a user
+router.post('/unfollow', protect, unfollowUser); // Unfollow a user
+router.get('/profile', protect, getProfile);
+router.get('/profile/:userId', protect, getProfile);
 
 module.exports = router;

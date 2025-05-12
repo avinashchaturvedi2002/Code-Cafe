@@ -2,10 +2,11 @@ require('dotenv').config();
 const axios = require('axios');
 const Problem = require('../models/Problem');
 const Submission = require('../models/Submission');
+const Feed = require('../models/Feed');  // Assuming the Feed model exists
 
 // Create a submission for a problem
 const submitSolution = async (req, res) => {
-  const { problemId, code, language } = req.body;
+  const { problemId, code, language, share } = req.body;  // Added 'share' field to body
   const user = req.user.id;
 
   try {
@@ -20,7 +21,10 @@ const submitSolution = async (req, res) => {
       code,
       language,
       status: 'Pending',
+      difficulty:problem.difficulty,
+      shared: share || false,  // Set the shared field based on request
     });
+    console.log(submission.language);
 
     await submission.save();
 
@@ -30,74 +34,113 @@ const submitSolution = async (req, res) => {
     submission.results = result.results;
     await submission.save();
 
+    // If the submission is passed and the user wants to share, create a post
+    if (submission.status === 'Passed' && submission.shared) {
+      const post = new Feed({
+        user: user,
+        content: `I solved the problem: ${problem.title}!`,
+        submission: submission._id,
+        likes: [],
+        comments: [],
+      });
+
+      await post.save();
+    }
+
     res.json(submission);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-// Evaluate the code against the test cases
-const evaluateCode = async (submission, problem) => {
-  let status = 'Passed';
-  const results = [];
-
-  for (const testCase of problem.testCases) {
-    const wrappedCode = `${submission.code}\n${testCase.input}`; // No need to add another print statement
-    const output = await executeCode(wrappedCode, '', submission.language);
-
-    const passed = output.trim() === testCase.output.trim();
-
-    results.push({
-      input: testCase.input,
-      expected: testCase.output,
-      output: output,
-      passed: passed,
-    });
-
-    if (!passed) {
-      status = 'Failed';
-    }
-  }
-
-  return { status, results };
-};
-
-// Function to execute code using Judge0
-const executeCode = async (code, input, language) => {
+// Function to evaluate the code against test cases
+const evaluateCode = async (submission,problem) => {
   try {
-    // Step 1: Submit the code to Judge0
-    const judge0URL = 'https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=false';
-    const payload = {
-      source_code: code,
-      stdin: input,
-      language_id: mapLanguageToJudge0(language),
+    console.log(submission);
+  
+    const result = await executeCode(submission.code, '', submission.language, problem);
+
+    const actualOutputs = result.stdout?.trim().split('\n') || [];
+    const results = [];
+    let status = 'Passed';
+
+    for (let i = 0; i < problem.testCases.length; i++) {
+      const expected = problem.testCases[i].output.trim();
+      const actual = actualOutputs[i]?.trim() || '';
+      const passed = actual === expected;
+
+      if (!passed) status = 'Failed';
+
+      results.push({
+        input: problem.testCases[i].input,
+        expected,
+        output: actual,
+        passed
+      });
+    }
+
+    return {
+      status,
+      results
     };
 
-    const submissionResponse = await axios.post(judge0URL, payload, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-RapidAPI-Key': process.env.JUDGE0_API_KEY,
-        'X-RapidAPI-Host': 'judge0-ce.p.rapidapi.com',
-      },
-    });
-
-    // The response contains a submission ID
-    const submissionId = submissionResponse.data.token;
-    console.log('Submission ID:', submissionId);
-
-    // Step 2: Check the status of the submission until it is complete
-    let statusResponse = await checkSubmissionStatus(submissionId);
-
-    // Step 3: Once the submission is completed, return the output or error
-    return statusResponse.stdout || statusResponse.stderr || 'No Output';
-  } catch (error) {
-    console.error('Execution error:', error.response?.data || error.message);
-    return 'Error during code execution';
+  } catch (err) {
+    console.error("Error while checking submission status:", err.message);
+    return {
+      status: "Error",
+      results: [],
+      error: err.message
+    };
   }
 };
 
+
+
+// Function to execute code using Judge0
+const executeCode = async (code, input, language, problem) => {
+  try {
+    let finalCode = code;
+    console.log(problem);
+    if (language.toLowerCase() === "python") {
+      const testCaseCalls = problem.testCases
+        .map(tc => `print(twoSum(${tc.input.trim()}))`)
+        .join("\n");
+
+      finalCode += `\n\n${testCaseCalls}`;
+    }
+
+    const response = await axios.post(
+      "https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=true",
+      {
+        source_code: finalCode,
+        stdin: input,
+        language_id: language === "python" ? 71 : 63, // 71 for Python, 63 for JavaScript
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-RapidAPI-Key": process.env.JUDGE0_API_KEY,
+          "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+        },
+      }
+    );
+
+    return response.data;
+  } catch (err) {
+    console.error("Error in executeCode:", err);
+    throw err;
+  }
+};
+
+
+
+
+
+
+
+
 // Function to check the status of the submission
-const checkSubmissionStatus = async (submissionId) => {
+const checkSubmissionStatus = async (submissionId, retries = 20) => {
   const judge0URL = `https://judge0-ce.p.rapidapi.com/submissions/${submissionId}`;
 
   try {
@@ -108,32 +151,53 @@ const checkSubmissionStatus = async (submissionId) => {
       },
     });
 
-    // If submission status is 'completed', return the result
-    if (statusResponse.data.status.id === 3) {
-      return statusResponse.data;
+    const data = statusResponse.data;
+    const statusId = data.status.id;
+
+    console.log('Submission Data:', data); // Added detailed log here
+
+    if (statusId <= 2 && retries > 0) {
+      console.log('Still processing, retrying...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return checkSubmissionStatus(submissionId, retries - 1);
     }
 
-    // If the submission is still processing, wait and try again
-    console.log('Still processing, retrying...');
-    await new Promise(resolve => setTimeout(resolve, 2000)); // wait 2 seconds
-    return checkSubmissionStatus(submissionId); // Retry
+    // 🛠️ Handle different error types based on status ID
+    switch (statusId) {
+      case 3:
+        // Accepted
+        return data;
+      case 6:
+        throw new Error(`Compilation Error:\n${data.compile_output}`);
+      case 11:
+        throw new Error(`Runtime Error:\n${data.stderr}`);
+      case 13:
+        throw new Error('Time Limit Exceeded');
+      default:
+        throw new Error(`Error: ${data.status.description}`);
+    }
+
   } catch (error) {
-    console.error('Error while checking submission status:', error.response?.data || error.message);
-    throw new Error('Error while checking submission status');
+    console.error('Error while checking submission status:', error.message);
+    throw new Error('Judge0 error: ' + error.message);
   }
 };
 
+
+
 // Map user-friendly language to Judge0 language IDs
 const mapLanguageToJudge0 = (language) => {
+  const normalizedLang = language.toLowerCase();
   const languageMap = {
-    'JavaScript': 63,
-    'Python': 71,
-    'C++': 54,
-    'Java': 62,
-    // Add more as needed
+    'javascript': 63,
+    'python': 71,
+    'cpp': 54,
+    'c++':54,
+    'java': 62,
   };
 
-  return languageMap[language] || 63; // Default to JavaScript
+  return languageMap[normalizedLang] || 63; // Default to JavaScript
 };
+
 
 module.exports = { submitSolution };

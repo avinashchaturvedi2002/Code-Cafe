@@ -32,6 +32,15 @@ const submissionSchema = new mongoose.Schema({
       passed: Boolean,
     },
   ],
+  shared: {  // New field to track if the submission is shared
+    type: Boolean,
+    default: false,
+  },
+  difficulty: {
+    type: String,  // e.g., 'easy', 'medium', 'hard'
+    enum: ['Easy', 'Medium', 'Hard'],
+    required: true,
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Submission', submissionSchema);
